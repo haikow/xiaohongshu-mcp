@@ -9,6 +9,11 @@ import (
 	"github.com/go-rod/rod"
 )
 
+var (
+	// GlobalFeedStorage 全局 Feed 存储实例
+	GlobalFeedStorage = NewFeedStorage()
+)
+
 type FeedsListAction struct {
 	page *rod.Page
 }
@@ -27,7 +32,7 @@ func NewFeedsListAction(page *rod.Page) *FeedsListAction {
 	return &FeedsListAction{page: pp}
 }
 
-// GetFeedsList 获取页面的 Feed 列表数据
+// GetFeedsList 获取页面的 Feed 列表数据，并存储到全局变量中
 func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
 	page := f.page.Context(ctx)
 
@@ -52,5 +57,10 @@ func (f *FeedsListAction) GetFeedsList(ctx context.Context) ([]Feed, error) {
 	}
 
 	// 返回 feed.feeds._value
-	return state.Feed.Feeds.Value, nil
+	feeds := state.Feed.Feeds.Value
+	
+	// 存储到全局变量，自动覆盖旧数据
+	GlobalFeedStorage.SetFeeds(feeds)
+	
+	return feeds, nil
 }
