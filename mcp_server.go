@@ -66,11 +66,26 @@ type LikeFeedArgs struct {
 	Unlike    bool   `json:"unlike,omitempty" jsonschema:"是否取消点赞，true为取消点赞，false或未设置则为点赞"`
 }
 
-// FavoriteFeedArgs 收藏参数
+// FavoriteFeedArgs 收藏笔记的参数
 type FavoriteFeedArgs struct {
 	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
 	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
 	Unfavorite bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
+}
+
+// BatchCommentArgs 批量评论的参数
+type BatchCommentArgs struct {
+	Limit int `json:"limit,omitempty" jsonschema:"限制评论数量，0表示处理所有待评论的Feed"`
+}
+
+// ExecuteBatchCommentArgs 执行批量评论的参数
+type ExecuteBatchCommentArgs struct {
+	Limit int `json:"limit,omitempty" jsonschema:"限制评论数量，0表示处理所有待评论的Feed"`
+}
+
+// ExecuteBatchCommentWithPageReuseArgs 执行批量评论（页面复用版本）的参数
+type ExecuteBatchCommentWithPageReuseArgs struct {
+	Limit int `json:"limit,omitempty" jsonschema:"限制评论数量，0表示处理所有待评论的Feed"`
 }
 
 // InitMCPServer 初始化 MCP Server
@@ -291,7 +306,76 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 	)
 
-	logrus.Infof("Registered %d MCP tools", 11)
+	// 工具 13: 批量评论
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "batch_comment",
+			Description: "获取待评论的Feed列表，供大模型生成个性化评论内容",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args BatchCommentArgs) (*mcp.CallToolResult, any, error) {
+			argsMap := map[string]interface{}{
+				"limit": args.Limit,
+			}
+			result := appServer.handleBatchComment(ctx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 14: 获取评论状态
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "get_comment_status",
+			Description: "获取所有Feed的评论状态统计",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleGetCommentStatus(ctx, map[string]interface{}{})
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 15: 重置失败的评论
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "reset_failed_comments",
+			Description: "重置所有失败的评论状态为待评论",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleResetFailedComments(ctx, map[string]interface{}{})
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 16: 执行批量评论
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "execute_batch_comment",
+			Description: "执行批量评论，逐个处理待评论的Feed，完成一个后再处理下一个",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args ExecuteBatchCommentArgs) (*mcp.CallToolResult, any, error) {
+			argsMap := map[string]interface{}{
+				"limit": args.Limit,
+			}
+			result := appServer.handleExecuteBatchComment(ctx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 17: 执行批量评论（页面复用版本）
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "execute_batch_comment_with_page_reuse",
+			Description: "执行批量评论（页面复用版本），在获取详情页后不关闭页面，直接在该页面上进行评论，减少页面开关次数",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args ExecuteBatchCommentWithPageReuseArgs) (*mcp.CallToolResult, any, error) {
+			argsMap := map[string]interface{}{
+				"limit": args.Limit,
+			}
+			result := appServer.handleExecuteBatchCommentWithPageReuse(ctx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	logrus.Infof("Registered %d MCP tools", 17)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

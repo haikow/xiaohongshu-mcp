@@ -24,3 +24,17 @@ func (f *FeedWithCommentStatus) GetXsecToken() string {
 func (f *FeedWithCommentStatus) GetID() string {
 	return f.Feed.ID
 }
+
+// String 返回状态的字符串表示
+func (s CommentStatus) String() string {
+	switch s {
+	case CommentStatusPending:
+		return "pending"
+	case CommentStatusSuccess:
+		return "success"
+	case CommentStatusFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}

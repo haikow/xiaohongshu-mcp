@@ -342,6 +342,31 @@ func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToke
 	return response, nil
 }
 
+// GetFeedDetailWithPage 获取Feed详情并返回页面实例
+func (s *XiaohongshuService) GetFeedDetailWithPage(ctx context.Context, feedID, xsecToken string) (*FeedDetailResponse, *rod.Page, error) {
+	b := newBrowser()
+
+	page := b.NewPage()
+
+	// 创建 Feed 详情 action
+	action := xiaohongshu.NewFeedDetailAction(page)
+
+	// 获取 Feed 详情并返回页面实例
+	result, page, err := action.GetFeedDetailWithPage(ctx, feedID, xsecToken)
+	if err != nil {
+		page.Close()
+		b.Close()
+		return nil, nil, err
+	}
+
+	response := &FeedDetailResponse{
+		FeedID: feedID,
+		Data:   result,
+	}
+
+	return response, page, nil
+}
+
 // UserProfile 获取用户信息
 func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken string) (*UserProfileResponse, error) {
 	b := newBrowser()
@@ -377,6 +402,17 @@ func (s *XiaohongshuService) PostCommentToFeed(ctx context.Context, feedID, xsec
 	action := xiaohongshu.NewCommentFeedAction(page)
 
 	if err := action.PostComment(ctx, feedID, xsecToken, content); err != nil {
+		return nil, err
+	}
+
+	return &PostCommentResponse{FeedID: feedID, Success: true, Message: "评论发表成功"}, nil
+}
+
+// PostCommentToFeedOnPage 在指定页面上发表评论到Feed
+func (s *XiaohongshuService) PostCommentToFeedOnPage(ctx context.Context, feedID, xsecToken, content string, page *rod.Page) (*PostCommentResponse, error) {
+	action := xiaohongshu.NewCommentFeedAction(page)
+
+	if err := action.PostCommentOnPage(ctx, feedID, xsecToken, content, page); err != nil {
 		return nil, err
 	}
 
@@ -454,6 +490,23 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 	action := xiaohongshu.NewCommentFeedAction(page)
 
 	if err := action.ReplyToComment(ctx, feedID, xsecToken, commentID, userID, content); err != nil {
+		return nil, err
+	}
+
+	return &ReplyCommentResponse{
+		FeedID:          feedID,
+		TargetCommentID: commentID,
+		TargetUserID:    userID,
+		Success:         true,
+		Message:         "评论回复成功",
+	}, nil
+}
+
+// ReplyCommentToFeedOnPage 在指定页面上回复指定评论
+func (s *XiaohongshuService) ReplyCommentToFeedOnPage(ctx context.Context, feedID, xsecToken, commentID, userID, content string, page *rod.Page) (*ReplyCommentResponse, error) {
+	action := xiaohongshu.NewCommentFeedAction(page)
+
+	if err := action.ReplyToCommentOnPage(ctx, feedID, xsecToken, commentID, userID, content, page); err != nil {
 		return nil, err
 	}
 

@@ -22,25 +22,42 @@ func NewCommentFeedAction(page *rod.Page) *CommentFeedAction {
 
 // PostComment 发表评论到 Feed
 func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, content string) error {
-	page := f.page.Context(ctx).Timeout(60 * time.Second)
+	return f.PostCommentOnPage(ctx, feedID, xsecToken, content, nil)
+}
 
-	// 构建详情页 URL
-	url := makeFeedDetailURL(feedID, xsecToken)
+// PostCommentOnPage 在指定页面上发表评论
+func (f *CommentFeedAction) PostCommentOnPage(ctx context.Context, feedID, xsecToken, content string, page *rod.Page) error {
+	var err error
+	
+	// 如果没有提供页面，则创建新页面
+	if page == nil {
+		page = f.page.Context(ctx).Timeout(60 * time.Second)
 
-	logrus.Infof("Opening feed detail page: %s", url)
+		// 构建详情页 URL
+		url := makeFeedDetailURL(feedID, xsecToken)
 
-	// 导航到详情页
-	if err := page.Navigate(url); err != nil {
-		logrus.Warnf("Failed to navigate to feed detail page: %v", err)
-		return fmt.Errorf("无法打开帖子详情页，该帖子可能在网页端不可访问: %w", err)
+		logrus.Infof("Opening feed detail page: %s", url)
+
+		// 导航到详情页
+		if err = page.Navigate(url); err != nil {
+			logrus.Warnf("Failed to navigate to feed detail page: %v", err)
+			return fmt.Errorf("无法打开帖子详情页，该帖子可能在网页端不可访问: %w", err)
+		}
+
+		if err = page.WaitStable(2 * time.Second); err != nil {
+			logrus.Warnf("Failed to wait for page stable: %v", err)
+			return fmt.Errorf("页面加载超时，该帖子可能在网页端不可访问: %w", err)
+		}
+
+		time.Sleep(1 * time.Second)
+	} else {
+		logrus.Infof("Using existing page for comment")
+		// 确保页面已经稳定
+		if err = page.WaitStable(1 * time.Second); err != nil {
+			logrus.Warnf("Failed to wait for existing page stable: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-
-	if err := page.WaitStable(2 * time.Second); err != nil {
-		logrus.Warnf("Failed to wait for page stable: %v", err)
-		return fmt.Errorf("页面加载超时，该帖子可能在网页端不可访问: %w", err)
-	}
-
-	time.Sleep(1 * time.Second)
 
 	// 查找评论输入框
 	elem, err := page.Element("div.input-box div.content-edit span")
@@ -85,12 +102,29 @@ func (f *CommentFeedAction) PostComment(ctx context.Context, feedID, xsecToken, 
 }
 // ReplyToComment 回复指定评论
 func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToken, commentID, userID, content string) error {
-	page := f.page.Context(ctx).Timeout(60 * time.Second)
-	url := makeFeedDetailURL(feedID, xsecToken)
-	logrus.Infof("Opening feed detail page for reply: %s", url)
-	page.MustNavigate(url)
-	page.MustWaitDOMStable()
-	time.Sleep(3 * time.Second) // 增加等待时间确保页面完全加载
+	return f.ReplyToCommentOnPage(ctx, feedID, xsecToken, commentID, userID, content, nil)
+}
+
+// ReplyToCommentOnPage 在指定页面上回复评论
+func (f *CommentFeedAction) ReplyToCommentOnPage(ctx context.Context, feedID, xsecToken, commentID, userID, content string, page *rod.Page) error {
+	var err error
+	
+	// 如果没有提供页面，则创建新页面
+	if page == nil {
+		page = f.page.Context(ctx).Timeout(60 * time.Second)
+		url := makeFeedDetailURL(feedID, xsecToken)
+		logrus.Infof("Opening feed detail page for reply: %s", url)
+		page.MustNavigate(url)
+		page.MustWaitDOMStable()
+		time.Sleep(3 * time.Second) // 增加等待时间确保页面完全加载
+	} else {
+		logrus.Infof("Using existing page for reply")
+		// 确保页面已经稳定
+		if err = page.WaitStable(1 * time.Second); err != nil {
+			logrus.Warnf("Failed to wait for existing page stable: %v", err)
+		}
+		time.Sleep(2 * time.Second) // 确保页面内容完全加载
+	}
 	
 	// 等待评论容器加载
 	waitForCommentsContainer(page)
@@ -103,7 +137,6 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	
 	// 尝试多次查找评论元素
 	var commentEl *rod.Element
-	var err error
 	for attempt := 0; attempt < 5; attempt++ { // 增加尝试次数
 		commentEl, err = findCommentElement(page, commentID, userID)
 		if err == nil {

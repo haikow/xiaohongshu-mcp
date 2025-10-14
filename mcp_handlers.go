@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 	"strings"
 	"time"
 )
@@ -595,6 +596,278 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 		Content: []MCPContent{{
 			Type: "text",
 			Text: responseText,
+		}},
+	}
+}
+
+// handleBatchComment 处理批量评论
+func (s *AppServer) handleBatchComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 批量评论")
+
+	// 解析参数
+	limit, _ := args["limit"].(int)
+	if limit <= 0 {
+		limit = 0 // 0表示处理所有待评论的Feed
+	}
+
+	logrus.Infof("MCP: 批量评论 - 限制数量: %d", limit)
+
+	// 获取待评论的Feed列表
+	pendingFeeds := xiaohongshu.GlobalFeedStorage.GetPendingFeeds()
+	if len(pendingFeeds) == 0 {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "没有待评论的Feed",
+			}},
+		}
+	}
+
+	// 限制处理数量
+	if limit > 0 && limit < len(pendingFeeds) {
+		pendingFeeds = pendingFeeds[:limit]
+	}
+
+	// 返回Feed列表，让大模型为每个Feed生成评论内容
+	feedList := make([]map[string]interface{}, 0, len(pendingFeeds))
+	for _, feed := range pendingFeeds {
+		feedInfo := map[string]interface{}{
+			"feed_id":     feed.GetID(),
+			"xsec_token":  feed.GetXsecToken(),
+		}
+		feedList = append(feedList, feedInfo)
+	}
+
+	// 格式化输出
+	jsonData, err := json.MarshalIndent(feedList, "", "  ")
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("获取待评论Feed列表失败，序列化错误: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: string(jsonData),
+		}},
+	}
+}
+
+// handleGetCommentStatus 处理获取评论状态
+func (s *AppServer) handleGetCommentStatus(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 获取评论状态")
+
+	// 创建批量评论服务
+	batchService := NewBatchCommentService(s.xiaohongshuService, xiaohongshu.GlobalFeedStorage)
+
+	// 获取状态统计
+	status := batchService.GetCommentStatus()
+	
+	// 获取所有Feed详情
+	feeds := xiaohongshu.GlobalFeedStorage.GetFeeds()
+	feedDetails := make([]map[string]interface{}, 0, len(feeds))
+	
+	for _, feed := range feeds {
+		detail := map[string]interface{}{
+			"feed_id":     feed.GetID(),
+			"title":       feed.Feed.NoteCard.DisplayTitle,
+			"status":      feed.Status.String(),
+			"xsec_token":  feed.GetXsecToken(),
+		}
+		feedDetails = append(feedDetails, detail)
+	}
+
+	result := map[string]interface{}{
+		"summary": status,
+		"feeds":   feedDetails,
+	}
+
+	// 格式化输出
+	jsonData, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("获取评论状态成功，但序列化失败: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: string(jsonData),
+		}},
+	}
+}
+
+// handleResetFailedComments 处理重置失败的评论
+func (s *AppServer) handleResetFailedComments(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 重置失败的评论")
+
+	// 创建批量评论服务
+	batchService := NewBatchCommentService(s.xiaohongshuService, xiaohongshu.GlobalFeedStorage)
+
+	// 重置失败的Feed
+	batchService.ResetFailedFeeds()
+
+	// 获取重置后的状态
+	status := batchService.GetCommentStatus()
+	statusText := fmt.Sprintf("已重置失败的评论 - 当前状态 - 待评论: %d, 成功: %d, 失败: %d", 
+		status["pending"], status["success"], status["failed"])
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: statusText,
+		}},
+	}
+}
+
+// handleExecuteBatchComment 处理执行批量评论
+func (s *AppServer) handleExecuteBatchComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 执行批量评论")
+
+	// 解析参数
+	limit, _ := args["limit"].(int)
+	if limit <= 0 {
+		limit = 0 // 0表示处理所有待评论的Feed
+	}
+
+	logrus.Infof("MCP: 执行批量评论 - 限制数量: %d", limit)
+
+	// 检查是否有待评论的Feed
+	pendingFeeds := xiaohongshu.GlobalFeedStorage.GetPendingFeeds()
+	if len(pendingFeeds) == 0 {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "没有待评论的Feed",
+			}},
+		}
+	}
+
+	logrus.Infof("发现 %d 个待评论的Feed，但此工具需要大模型提供评论内容", len(pendingFeeds))
+
+	// 返回Feed列表，让大模型为每个Feed生成评论内容
+	feedList := make([]map[string]interface{}, 0, len(pendingFeeds))
+	for _, feed := range pendingFeeds {
+		feedInfo := map[string]interface{}{
+			"feed_id":     feed.GetID(),
+			"xsec_token":  feed.GetXsecToken(),
+		}
+		feedList = append(feedList, feedInfo)
+	}
+
+	// 格式化输出
+	jsonData, err := json.MarshalIndent(feedList, "", "  ")
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("获取待评论Feed列表失败，序列化错误: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 返回Feed列表和说明
+	instruction := "请为以下每个Feed生成评论内容，然后使用post_comment_to_feed工具逐个发表评论。完成一个评论后再处理下一个，避免同时打开多个页面。"
+	resultText := fmt.Sprintf("%s\n\n%s", instruction, string(jsonData))
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: resultText,
+		}},
+	}
+}
+
+// handleExecuteBatchCommentWithPageReuse 处理执行批量评论（页面复用版本）
+func (s *AppServer) handleExecuteBatchCommentWithPageReuse(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 执行批量评论（页面复用版本）")
+
+	// 解析参数
+	limit, _ := args["limit"].(int)
+	if limit <= 0 {
+		limit = 0 // 0表示处理所有待评论的Feed
+	}
+
+	logrus.Infof("MCP: 执行批量评论 - 限制数量: %d", limit)
+
+	// 检查是否有待评论的Feed
+	pendingFeeds := xiaohongshu.GlobalFeedStorage.GetPendingFeeds()
+	if len(pendingFeeds) == 0 {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "没有待评论的Feed",
+			}},
+		}
+	}
+
+	logrus.Infof("发现 %d 个待评论的Feed，开始逐个处理（页面复用模式）", len(pendingFeeds))
+
+	// 限制处理数量
+	if limit > 0 && limit < len(pendingFeeds) {
+		pendingFeeds = pendingFeeds[:limit]
+	}
+
+	// 统计结果
+	successCount := 0
+	failedCount := 0
+
+	// 逐个处理Feed
+	for i, feed := range pendingFeeds {
+		feedID := feed.GetID()
+		xsecToken := feed.GetXsecToken()
+		
+		logrus.Infof("处理第 %d/%d 个Feed: %s", i+1, len(pendingFeeds), feedID)
+
+		// 获取详情页并保持页面打开
+		_, page, err := s.xiaohongshuService.GetFeedDetailWithPage(ctx, feedID, xsecToken)
+		if err != nil {
+			logrus.Errorf("获取Feed详情失败: %v", err)
+			failedCount++
+			xiaohongshu.GlobalFeedStorage.MarkFeedAsCommented(feedID, false)
+			continue
+		}
+
+		// 在同一页面上发表评论
+		commentContent := "很棒的内容，感谢分享！" // 这里可以由大模型生成
+		_, err = s.xiaohongshuService.PostCommentToFeedOnPage(ctx, feedID, xsecToken, commentContent, page)
+		
+		// 关闭页面
+		page.Close()
+		
+		if err != nil {
+			logrus.Errorf("发表评论失败: %v", err)
+			failedCount++
+			xiaohongshu.GlobalFeedStorage.MarkFeedAsCommented(feedID, false)
+		} else {
+			logrus.Infof("成功评论Feed: %s", feedID)
+			successCount++
+			xiaohongshu.GlobalFeedStorage.MarkFeedAsCommented(feedID, true)
+		}
+
+		// 添加延迟，避免请求过于频繁
+		if i < len(pendingFeeds)-1 {
+			logrus.Infof("等待2秒后处理下一个Feed...")
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	resultText := fmt.Sprintf("批量评论完成 - 成功: %d, 失败: %d", successCount, failedCount)
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: resultText,
 		}},
 	}
 }
