@@ -239,9 +239,36 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args map[string]inter
 		}
 	}
 
-	logrus.Infof("MCP: 搜索Feeds - 关键词: %s", keyword)
+	var filters []xiaohongshu.FilterOption
+	if sortBy, ok := args["sort_by"].(string); ok && sortBy != "" {
+		if option, err := xiaohongshu.SortBy(sortBy); err == nil {
+			filters = append(filters, option)
+		}
+	}
+	if noteType, ok := args["note_type"].(string); ok && noteType != "" {
+		if option, err := xiaohongshu.NoteType(noteType); err == nil {
+			filters = append(filters, option)
+		}
+	}
+	if timeRange, ok := args["time_range"].(string); ok && timeRange != "" {
+		if option, err := xiaohongshu.TimeRange(timeRange); err == nil {
+			filters = append(filters, option)
+		}
+	}
+	if searchScope, ok := args["search_scope"].(string); ok && searchScope != "" {
+		if option, err := xiaohongshu.SearchScope(searchScope); err == nil {
+			filters = append(filters, option)
+		}
+	}
+	if locationDistance, ok := args["location_distance"].(string); ok && locationDistance != "" {
+		if option, err := xiaohongshu.LocationDistance(locationDistance); err == nil {
+			filters = append(filters, option)
+		}
+	}
 
-	result, err := s.xiaohongshuService.SearchFeeds(ctx, keyword)
+	logrus.Infof("MCP: 搜索Feeds - 关键词: %s, 筛选条件: %d", keyword, len(filters))
+
+	result, err := s.xiaohongshuService.SearchFeeds(ctx, keyword, filters...)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{
@@ -423,7 +450,7 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 	
 	action := "点赞"
 	if unlike {
-		action = "取消点赞"
+			action = "取消点赞"
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("%s成功 - Feed ID: %s", action, res.FeedID)}}}
 }
@@ -459,7 +486,7 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 	
 	action := "收藏"
 	if unfavorite {
-		action = "取消收藏"
+			action = "取消收藏"
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("%s成功 - Feed ID: %s", action, res.FeedID)}}}
 }
@@ -871,3 +898,4 @@ func (s *AppServer) handleExecuteBatchCommentWithPageReuse(ctx context.Context, 
 		}},
 	}
 }
+
