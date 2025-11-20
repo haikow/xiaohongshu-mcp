@@ -35,6 +35,55 @@ func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken 
 	page.MustWaitDOMStable()
 	time.Sleep(1 * time.Second)
 
+	// === 新增：提前检测「笔记暂时无法浏览」或类似不可访问页面 ===
+	// 2025年11月实测，小红书有多种不可访问提示，以下是目前最常见的几种文案和结构
+	unavailableResult := page.MustEval(`() => {
+		const wrapper = document.querySelector('.access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper');
+		if (!wrapper) return null;
+
+		const text = wrapper.textContent || '';
+		const keywords = [
+			'当前笔记暂时无法浏览',
+			'该内容因违规已被删除',
+			'该笔记已被删除',
+			'内容不存在',
+			'笔记不存在',
+			'已失效',
+			'私密笔记',
+			'仅作者可见',
+			'因用户设置，你无法查看',
+			'因违规无法查看'
+		];
+
+		for (const kw of keywords) {
+			if (text.includes(kw)) {
+				return kw.trim();
+			}
+		}
+		return null;
+	}`)
+
+	// The result is a gson.JSON object. We need to get its raw JSON representation to check for "null".
+	rawJSON, err := unavailableResult.MarshalJSON()
+	if err != nil {
+		logrus.Errorf("无法解析页面状态检查的结果: %v", err)
+		return nil, fmt.Errorf("无法解析页面状态检查的结果: %w", err)
+	}
+
+	if string(rawJSON) != "null" {
+		var reason string
+		// JS 返回的字符串会被 JSON 编码，所以需要 Unmarshal
+		if err := json.Unmarshal(rawJSON, &reason); err == nil {
+			logrus.Warnf("笔记不可访问: %s", reason)
+			return nil, fmt.Errorf("笔记不可访问: %s", reason)
+		} else {
+			// 如果解析失败，直接使用原始值
+			rawReason := string(rawJSON)
+			logrus.Warnf("笔记不可访问，且无法解析原因: %s", rawReason)
+			return nil, fmt.Errorf("笔记不可访问，无法解析原因: %s", rawReason)
+		}
+	}
+
 	if loadAllComments {
 		scrollAllCommentsJS := `() => {
 		const INTERVAL_MS = 900;

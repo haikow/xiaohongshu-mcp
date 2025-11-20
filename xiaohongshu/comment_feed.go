@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -91,7 +92,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	logrus.Infof("Opening feed detail page for reply: %s", url)
 	page.MustNavigate(url)
 	page.MustWaitDOMStable()
-	time.Sleep(3 * time.Second) // 增加等待时间确保页面完全加载
+	time.Sleep(3 * time.Second)
 
 	// 等待评论容器加载
 	waitForCommentsContainer(page)
@@ -105,15 +106,35 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	// 尝试多次查找评论元素
 	var commentEl *rod.Element
 	var err error
-	for attempt := 0; attempt < 5; attempt++ { // 增加尝试次数
+	maxAttempts := 15
+	consecutiveFailures := 0
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		commentEl, err = findCommentElement(page, commentID, userID)
 		if err == nil {
+			logrus.Infof("成功找到评论元素，尝试次数: %d", attempt+1)
 			break
 		}
-		logrus.Warnf("Attempt %d: Failed to find comment: %v", attempt+1, err)
-		time.Sleep(2 * time.Second) // 增加等待时间
+
+		logrus.Warnf("Attempt %d/%d: Failed to find comment: %v", attempt+1, maxAttempts, err)
+		consecutiveFailures++
+
+		if consecutiveFailures >= 5 {
+			logrus.Warnf("连续 %d 次查找失败，等待更长时间", consecutiveFailures)
+			time.Sleep(3 * time.Second)
+		} else {
+			time.Sleep(1500 * time.Millisecond)
+		}
+
 		ensureCommentsVisible(page)
-		scrollComments(page) // 每次尝试后滚动
+
+		if reachedCommentsEnd(page) {
+			logrus.Infof("已到达评论底部，在第 %d 次尝试后", attempt+1)
+			if attempt >= maxAttempts-3 {
+				logrus.Warnf("已到达评论底部且接近最大尝试次数，提前结束")
+				break
+			}
+		}
 	}
 
 	if err != nil {
@@ -122,11 +143,11 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 
 	// 滚动到评论位置
 	_, _ = commentEl.Eval(`() => { try { this.scrollIntoView({behavior: "instant", block: "center"}); } catch (e) {} return true }`)
-	time.Sleep(1 * time.Second) // 增加等待时间
+	time.Sleep(1 * time.Second)
 
 	// 尝试多次点击回复按钮
 	var replyBtn *rod.Element
-	for attempt := 0; attempt < 5; attempt++ { // 增加尝试次数
+	for attempt := 0; attempt < 5; attempt++ {
 		replyBtn, err = findReplyButton(commentEl)
 		if err == nil {
 			if tryClickChainForComment(replyBtn) {
@@ -134,14 +155,14 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 			}
 		}
 		logrus.Warnf("Attempt %d: Failed to click reply button: %v", attempt+1, err)
-		time.Sleep(1 * time.Second) // 增加等待时间
+		time.Sleep(1 * time.Second)
 	}
 
 	if err != nil || replyBtn == nil {
 		return fmt.Errorf("无法点击回复按钮")
 	}
 
-	time.Sleep(2 * time.Second) // 增加等待时间确保回复输入框出现
+	time.Sleep(2 * time.Second)
 
 	// 查找回复输入框
 	inputEl, err := findReplyInput(page, commentEl)
@@ -155,7 +176,7 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 	}
 
 	inputEl.MustInput(content)
-	time.Sleep(500 * time.Millisecond) // 增加等待时间
+	time.Sleep(500 * time.Millisecond)
 
 	// 查找并点击提交按钮
 	submitBtn, err := findSubmitButton(page)
@@ -167,49 +188,325 @@ func (f *CommentFeedAction) ReplyToComment(ctx context.Context, feedID, xsecToke
 		return fmt.Errorf("点击回复提交按钮失败")
 	}
 
-	time.Sleep(3 * time.Second) // 增加等待时间确保回复提交完成
+	time.Sleep(3 * time.Second)
 	return nil
 }
 
 func findCommentElement(page *rod.Page, commentID, userID string) (*rod.Element, error) {
 	var lastErr error
 
-	// 首先尝试确保评论区域可见
 	ensureCommentsVisible(page)
 
-	for attempt := 0; attempt < 20; attempt++ { // 增加尝试次数
-		logrus.Infof("查找评论，尝试次数: %d", attempt+1)
+	identifier := buildIdentifier(commentID, userID)
+	maxAttempts := 60
+	attempt := 0
+	consecutiveNoContentLoad := 0
+	lastScrollPos := 0
+	totalClickedButtons := 0
+
+	previousScrollHeight := getScrollHeight(page)
+
+	// 第一阶段：向下滚动到底部，同时点击所有"更多"按钮
+	logrus.Infof("开始第一阶段：向下滚动到底部并展开所有\"更多\"")
+	for attempt < maxAttempts {
+		attempt++
+		logrus.Infof("查找评论，尝试次数: %d/%d", attempt, maxAttempts)
+
+		// 每次滚动都点击"更多"按钮
+		clicked := clickShowMoreButtons(page)
+		if clicked > 0 {
+			totalClickedButtons += clicked
+			logrus.Infof("点击了 %d 个\"更多\"按钮，累计: %d", clicked, totalClickedButtons)
+			time.Sleep(300 * time.Millisecond)
+
+			// 点击后立即查找
+			el, err := locateCommentElement(page, commentID, userID)
+			if err == nil && el != nil {
+				logrus.Infof("点击\"更多\"后立即找到评论")
+				return el, nil
+			}
+		}
+
+		// 查找目标评论
 		el, err := locateCommentElement(page, commentID, userID)
 		if err == nil && el != nil {
-			logrus.Infof("成功找到评论")
+			logrus.Infof("成功找到评论，共点击了 %d 个\"更多\"按钮", totalClickedButtons)
 			return el, nil
 		}
 		if err != nil {
 			lastErr = err
 		}
 
-		// 每3次尝试后进行一次更彻底的滚动
-		if attempt%3 == 0 {
-			// 更彻底的滚动策略
+		time.Sleep(1500 * time.Millisecond)
+
+		isVisualEnd := reachedCommentsEnd(page)
+
+		// 滚动
+		scrolled := scrollComments(page)
+		if !scrolled {
 			performFullScroll(page)
-		} else {
-			// 常规滚动
-			if !scrollComments(page) {
-				logrus.Infof("滚动到底部，无法继续滚动")
-				break
-			}
+			time.Sleep(1000 * time.Millisecond)
 		}
-		time.Sleep(800 * time.Millisecond) // 增加等待时间
+
+		// 滚动后再次点击"更多"按钮（因为新内容可能有新的"更多"）
+		clicked = clickShowMoreButtons(page)
+		if clicked > 0 {
+			totalClickedButtons += clicked
+			logrus.Infof("滚动后点击了 %d 个\"更多\"按钮", clicked)
+			time.Sleep(300 * time.Millisecond)
+		}
+
+		newScrollPos := getCurrentScrollPosition(page)
+		newScrollHeight := getScrollHeight(page)
+
+		actuallyScrolled := newScrollPos > lastScrollPos
+		scrollHeightIncreased := newScrollHeight > previousScrollHeight
+
+		if actuallyScrolled || scrollHeightIncreased {
+			lastScrollPos = newScrollPos
+			consecutiveNoContentLoad = 0
+		} else {
+			consecutiveNoContentLoad++
+		}
+
+		// 到达底部
+		if consecutiveNoContentLoad >= 8 || isVisualEnd {
+			logrus.Infof("已到达底部，开始第二阶段：从头到尾再次查找")
+			break
+		}
+
+		previousScrollHeight = newScrollHeight
 	}
 
+	// 第二阶段：从头到尾点击所有"更多"按钮并查找
+	logrus.Infof("第二阶段：滚回顶部")
+	scrollToTop(page)
+	time.Sleep(2 * time.Second)
+
+	// 重新从顶部开始，这次更细致地查找
+	logrus.Infof("第二阶段：从顶部开始细致查找")
+	previousScrollHeight = 0
+	lastScrollPos = 0
+	consecutiveNoContentLoad = 0
+	secondPhaseAttempts := 0
+	maxSecondPhaseAttempts := 40
+
+	for secondPhaseAttempts < maxSecondPhaseAttempts {
+		secondPhaseAttempts++
+		logrus.Infof("第二阶段查找，尝试次数: %d/%d", secondPhaseAttempts, maxSecondPhaseAttempts)
+
+		// 点击当前视口内所有"更多"按钮
+		clicked := clickShowMoreButtons(page)
+		if clicked > 0 {
+			totalClickedButtons += clicked
+			logrus.Infof("第二阶段点击了 %d 个\"更多\"按钮", clicked)
+			time.Sleep(500 * time.Millisecond)
+
+			// 点击后等待内容展开，再点击一次
+			for i := 0; i < 3; i++ {
+				time.Sleep(300 * time.Millisecond)
+				clicked2 := clickShowMoreButtons(page)
+				if clicked2 > 0 {
+					totalClickedButtons += clicked2
+					logrus.Infof("第二阶段额外点击了 %d 个\"更多\"按钮", clicked2)
+				}
+			}
+		}
+
+		// 查找目标评论
+		el, err := locateCommentElement(page, commentID, userID)
+		if err == nil && el != nil {
+			logrus.Infof("第二阶段找到评论，共点击了 %d 个\"更多\"按钮", totalClickedButtons)
+			return el, nil
+		}
+
+		time.Sleep(1000 * time.Millisecond)
+
+		// 缓慢滚动，确保不错过任何内容
+		scrolled := scrollCommentsSlowly(page)
+		if !scrolled {
+			logrus.Infof("第二阶段无法继续滚动，可能已到底部")
+			break
+		}
+
+		newScrollPos := getCurrentScrollPosition(page)
+		if newScrollPos <= lastScrollPos {
+			consecutiveNoContentLoad++
+		} else {
+			lastScrollPos = newScrollPos
+			consecutiveNoContentLoad = 0
+		}
+
+		if consecutiveNoContentLoad >= 5 {
+			logrus.Infof("第二阶段连续 %d 次无法滚动，结束查找", consecutiveNoContentLoad)
+			break
+		}
+	}
+
+	logrus.Infof("结束查找评论，总尝试次数: %d，共点击了 %d 个\"更多\"按钮", attempt+secondPhaseAttempts, totalClickedButtons)
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("未找到评论: %s", buildIdentifier(commentID, userID))
+	if identifier != "" {
+		return nil, fmt.Errorf("未找到评论: %s", identifier)
+	}
+	return nil, fmt.Errorf("未找到目标评论")
+}
+
+// scrollToTop 滚动到页面顶部
+func scrollToTop(page *rod.Page) {
+	scrollJS := `() => {
+		const commentsContainer = document.querySelector('.comments-container');
+		if (commentsContainer) {
+			commentsContainer.scrollIntoView({behavior: 'instant', block: 'start'});
+		}
+		window.scrollTo(0, 0);
+		const scrollRoot = document.scrollingElement || document.documentElement || document.body;
+		scrollRoot.scrollTop = 0;
+		return true;
+	}`
+	page.Eval(scrollJS)
+}
+
+// scrollCommentsSlowly 缓慢滚动评论区，每次滚动少一点
+func scrollCommentsSlowly(page *rod.Page) bool {
+	scrollJS := `() => {
+		try {
+			const DELTA = 300; // 每次只滚动300px
+			
+			const scrollRoot = document.scrollingElement || document.documentElement || document.body;
+			const container = document.querySelector('.comments-container');
+			
+			const metrics = (el) => {
+				if (!el) {
+					return { top: 0, max: 0 };
+				}
+				if (el === window || el === document || el === document.body || el === document.documentElement) {
+					const root = scrollRoot;
+					return {
+						top: root.scrollTop,
+						max: Math.max(root.scrollHeight - root.clientHeight, 0)
+					};
+				}
+				return {
+					top: el.scrollTop,
+					max: Math.max(el.scrollHeight - el.clientHeight, 0)
+				};
+			};
+			
+			const setScrollTop = (el, value) => {
+				if (!el) return;
+				if (el === window || el === document || el === document.body || el === document.documentElement || el === scrollRoot) {
+					scrollRoot.scrollTop = value;
+					window.scrollBy(0, value - scrollRoot.scrollTop);
+				} else {
+					el.scrollTop = value;
+				}
+			};
+			
+			// 优先滚动评论容器
+			let target = container || scrollRoot;
+			const before = metrics(target);
+			const desired = Math.min(before.top + DELTA, before.max);
+			
+			if (desired > before.top) {
+				setScrollTop(target, desired);
+				return true;
+			}
+			
+			return false;
+		} catch (err) {
+			console.debug('scrollCommentsSlowly error', err);
+			return false;
+		}
+	}`
+	res, err := page.Eval(scrollJS)
+	if err != nil {
+		logrus.Warnf("缓慢滚动失败: %v", err)
+		return false
+	}
+	if res == nil {
+		return false
+	}
+	return res.Value.Bool()
+}
+
+// clickShowMoreButtons 点击所有"更多"按钮
+func clickShowMoreButtons(page *rod.Page) int {
+	clickJS := `() => {
+		const selectors = [
+			'.show-more',
+			'.show-more-btn',
+			'[class*="show-more"]',
+			'[class*="showMore"]'
+		];
+		
+		const clickedElements = new Set();
+		let clickedCount = 0;
+		
+		selectors.forEach((selector) => {
+			try {
+				const elements = document.querySelectorAll(selector);
+				elements.forEach((el) => {
+					if (clickedElements.has(el)) return;
+					
+					const text = el.textContent || '';
+					const className = el.className || '';
+					const shouldClick = text.includes('更多') || 
+					                   className.includes('show-more') || 
+					                   className.includes('showMore');
+					
+					if (!shouldClick) return;
+					
+					const rect = el.getBoundingClientRect();
+					const style = window.getComputedStyle(el);
+					const isVisible = (
+						rect.height > 0 &&
+						rect.width > 0 &&
+						style.display !== 'none' &&
+						style.visibility !== 'hidden' &&
+						style.opacity !== '0' &&
+						rect.top < window.innerHeight + 500 &&
+						rect.bottom > -500
+					);
+					
+					if (isVisible) {
+						try {
+							el.click();
+							
+							if (el.parentElement && el.parentElement.classList.contains('show-more')) {
+								el.parentElement.click();
+							}
+							
+							clickedElements.add(el);
+							clickedCount++;
+						} catch (err) {
+							console.debug('点击失败', err);
+						}
+					}
+				});
+			} catch (err) {
+				console.debug('选择器错误: ' + selector, err);
+			}
+		});
+		
+		return clickedCount;
+	}`
+
+	res, err := page.Eval(clickJS)
+	if err != nil {
+		logrus.Warnf("点击\"更多\"按钮失败: %v", err)
+		return 0
+	}
+
+	if res == nil || res.Value.Num() == 0 {
+		return 0
+	}
+
+	return int(res.Value.Num())
 }
 
 func locateCommentElement(page *rod.Page, commentID, userID string) (*rod.Element, error) {
-	// 如果在comments-container内没有找到，尝试在整个页面查找
 	if commentID != "" {
 		if el, err := locateCommentElementByCommentID(page, commentID); err == nil && el != nil {
 			return el, nil
@@ -233,13 +530,16 @@ func locateCommentElementByCommentID(page *rod.Page, commentID string) (*rod.Ele
 		return nil, fmt.Errorf("评论ID为空")
 	}
 
-	// 首先尝试直接通过ID查找（根据HTML结构中的id="comment-68d9df3e0000000002015818"）
 	idSelector := fmt.Sprintf("#comment-%s", commentID)
-	if el, err := page.Element(idSelector); err == nil && el != nil {
-		return el, nil
+	el, err := page.Element(idSelector)
+	if err != nil {
+		return nil, fmt.Errorf("未找到评论ID: %s", commentID)
 	}
-
-	return nil, fmt.Errorf("未找到评论ID: %s", commentID)
+	err = el.WaitVisible()
+	if err != nil {
+		return nil, fmt.Errorf("评论ID %s 不可见: %w", commentID, err)
+	}
+	return el, nil
 }
 
 func locateCommentElementByUserID(page *rod.Page, userID string) (*rod.Element, error) {
@@ -252,46 +552,49 @@ func locateCommentElementByUserID(page *rod.Page, userID string) (*rod.Element, 
 	}
 
 	for _, selector := range selectors {
-		if el, err := page.Element(selector); err == nil && el != nil {
-			// 使用JavaScript查找父级评论元素
-			jsCode := `() => {
-				let current = this;
-				while (current) {
-					if (current.classList && (current.classList.contains('comment-item') || current.classList.contains('comment'))) {
-						return current;
-					}
-					current = current.parentElement;
+		el, err := page.Element(selector)
+		if err != nil {
+			continue
+		}
+		err = el.WaitVisible()
+		if err != nil {
+			logrus.Warnf("用户ID %s 的评论元素不可见: %v", userID, err)
+			continue
+		}
+
+		jsCode := `() => {
+			let current = this;
+			while (current) {
+				if (current.classList && (current.classList.contains('comment-item') || current.classList.contains('comment'))) {
+					return current;
 				}
-				return this;
-			}`
-			if _, err := el.Eval(jsCode); err == nil {
-				return el, nil
+				current = current.parentElement;
 			}
+			return this;
+		}`
+		if _, err := el.Eval(jsCode); err == nil {
 			return el, nil
 		}
+		return el, nil
 	}
 
 	return nil, fmt.Errorf("未找到用户ID: %s", userID)
 }
 
-// 等待评论容器加载完成
 func waitForCommentsContainer(page *rod.Page) {
 	jsCode := `() => {
-		// 等待comments-container元素出现
 		let attempts = 0;
 		const maxAttempts = 10;
 		
 		const checkContainer = () => {
 			const container = document.querySelector('.comments-container');
 			if (container) {
-				// 检查容器内是否有评论内容
 				const comments = container.querySelectorAll('.comment-item, .comment');
 				return comments.length > 0;
 			}
 			return false;
 		};
 		
-		// 定期检查评论容器是否加载完成
 		const interval = setInterval(() => {
 			attempts++;
 			if (checkContainer() || attempts >= maxAttempts) {
@@ -303,36 +606,23 @@ func waitForCommentsContainer(page *rod.Page) {
 	}`
 
 	page.Eval(jsCode)
-	time.Sleep(2 * time.Second) // 等待检查完成
+	time.Sleep(2 * time.Second)
 }
 
 func ensureCommentsVisible(page *rod.Page) {
-	// 专门针对comments-container元素的JavaScript代码
 	jsCode := `() => {
-		// 查找comments-container元素
 		const commentsContainer = document.querySelector('.comments-container');
-		
-		// 如果找到comments-container，尝试滚动到视图中并在其内部滚动
-		if (commentsContainer) {
-			// 先滚动到视图中
-			commentsContainer.scrollIntoView({behavior: 'instant', block: 'start'});
-			
-			// 等待一下再在容器内部滚动
-			setTimeout(() => {
-				// 在comments-container内部滚动以显示评论
-				if (commentsContainer.scrollHeight > commentsContainer.clientHeight) {
-					const maxScroll = commentsContainer.scrollHeight - commentsContainer.clientHeight;
-					if (maxScroll > 0) {
-						// 滚动到一半位置
-						commentsContainer.scrollTop = Math.min(maxScroll, commentsContainer.clientHeight * 0.5);
-					}
-				}
-			}, 200);
-			
+		if (!commentsContainer) {
+			return false;
+		}
+		if (commentsContainer.dataset._xhEnsured === '1') {
 			return true;
 		}
-		
-		return false;
+		commentsContainer.dataset._xhEnsured = '1';
+		try {
+			commentsContainer.scrollIntoView({behavior: 'instant', block: 'start'});
+		} catch (e) {}
+		return true;
 	}`
 
 	page.Eval(jsCode)
@@ -341,22 +631,157 @@ func ensureCommentsVisible(page *rod.Page) {
 
 func scrollComments(page *rod.Page) bool {
 	scrollJS := `() => {
-		let scrolled = false;
-		
-		// 专门查找comments-container元素
-		const commentsContainer = document.querySelector('.comments-container');
-		
-		if (commentsContainer) {
-			const maxScroll = commentsContainer.scrollHeight - commentsContainer.clientHeight;
-			if (maxScroll > 0 && commentsContainer.scrollTop < maxScroll) {
-				// 滚动更多内容
-				const delta = Math.max(commentsContainer.clientHeight * 0.8, 400);
-				commentsContainer.scrollTop = Math.min(maxScroll, commentsContainer.scrollTop + delta);
-				scrolled = true;
-			}
-		}
+		try {
+			const END_SELECTOR = '.end-container';
+			const DELTA_MIN = 480;
+			const MAX_FRAME_WAIT = 4;
 
-		return scrolled;
+			const reachedEnd = () => {
+				const endEl = document.querySelector(END_SELECTOR);
+				if (!endEl) return false;
+				const text = (endEl.textContent || '').toUpperCase();
+				return text.includes('THE END');
+			};
+
+			if (reachedEnd()) {
+				return false;
+			}
+
+			const scrollRoot = document.scrollingElement || document.documentElement || document.body;
+			const container = document.querySelector('.comments-container');
+			const candidatesSet = new Set();
+
+			const pushCandidate = (node) => {
+				if (node && node instanceof HTMLElement) {
+					candidatesSet.add(node);
+				}
+			};
+
+			if (container) {
+				let current = container;
+				while (current) {
+					pushCandidate(current);
+					if (current === document.body || current === document.documentElement) {
+						break;
+					}
+					current = current.parentElement;
+				}
+				container.querySelectorAll('.comments-el, .list-container, [data-v-4a19279a][name="list"]').forEach(pushCandidate);
+			}
+
+			pushCandidate(scrollRoot);
+			pushCandidate(document.body);
+			pushCandidate(document.documentElement);
+
+			const metrics = (el) => {
+				if (!el) {
+					return { top: 0, max: 0, client: window.innerHeight };
+				}
+				if (el === window || el === document || el === document.body || el === document.documentElement) {
+					const root = scrollRoot;
+					return {
+						top: root.scrollTop,
+						max: Math.max(root.scrollHeight - root.clientHeight, 0),
+						client: root.clientHeight || window.innerHeight
+					};
+				}
+				return {
+					top: el.scrollTop,
+					max: Math.max(el.scrollHeight - el.clientHeight, 0),
+					client: el.clientHeight
+				};
+			};
+
+			const setScrollTop = (el, value) => {
+				if (!el) return;
+				if (el === window || el === document || el === document.body || el === document.documentElement || el === scrollRoot) {
+					scrollRoot.scrollTop = value;
+				} else {
+					el.scrollTop = value;
+				}
+			};
+
+			const dispatchWheel = (el, delta) => {
+				if (!el) return;
+				try {
+					el.dispatchEvent(new Event('scroll', { bubbles: true }));
+					if (typeof WheelEvent === 'function' && delta !== 0) {
+						const wheel = new WheelEvent('wheel', { deltaY: delta, bubbles: true, cancelable: true });
+						el.dispatchEvent(wheel);
+					}
+				} catch (e) {
+					console.debug('dispatchWheel error', e);
+				}
+			};
+
+			const waitForUpdatedScrollTop = (el, beforeTop) => {
+				let tries = 0;
+				return new Promise((resolve) => {
+					const check = () => {
+						tries++;
+						const current = metrics(el).top;
+						if (Math.abs(current - beforeTop) >= 5 || tries >= MAX_FRAME_WAIT) {
+							resolve(Math.abs(current - beforeTop) >= 5);
+							return;
+						}
+						setTimeout(check, 60);
+					};
+					setTimeout(check, 60);
+				});
+			};
+
+			const weighted = Array.from(candidatesSet).map((node) => {
+				const style = window.getComputedStyle(node);
+				const overflowY = style.overflowY;
+				const scrollable = node.scrollHeight - node.clientHeight > 40;
+				const hasScrollStyle = /auto|scroll|overlay/i.test(overflowY);
+				const weight =
+					(container && node === container ? 1200 : 0) +
+					(container && node.contains && node !== container && node.contains(container) ? 800 : 0) +
+					(hasScrollStyle ? 300 : 0) +
+					(scrollable ? 300 : 0) -
+					(node === document.body || node === document.documentElement ? 50 : 0);
+				return { node, weight };
+			});
+
+			weighted.sort((a, b) => b.weight - a.weight);
+
+			const candidates = weighted.slice(0, 6);
+			const tryScroll = async (node) => {
+				const before = metrics(node);
+				const delta = Math.max(before.client * 0.85, DELTA_MIN);
+				const desired = before.max > 0 ? Math.min(before.top + delta, before.max) : before.top + delta;
+				const applied = Math.max(0, desired - before.top);
+
+				setScrollTop(node, desired);
+				dispatchWheel(node, applied);
+				window.scrollBy(0, applied);
+
+				const moved = await waitForUpdatedScrollTop(node, before.top);
+				if (!moved && node !== scrollRoot) {
+					const rootBefore = metrics(scrollRoot).top;
+					setScrollTop(scrollRoot, rootBefore + delta);
+					dispatchWheel(scrollRoot, delta);
+					window.scrollBy(0, delta);
+					return waitForUpdatedScrollTop(scrollRoot, rootBefore);
+				}
+				return moved;
+			};
+
+			const run = async () => {
+				for (const { node } of candidates) {
+					if (await tryScroll(node)) {
+						return true;
+					}
+				}
+				return false;
+			};
+
+			return run().then((moved) => moved && !reachedEnd());
+		} catch (err) {
+			console.debug('scrollComments error', err);
+			return false;
+		}
 	}`
 	res, err := page.Eval(scrollJS)
 	if err != nil {
@@ -369,43 +794,171 @@ func scrollComments(page *rod.Page) bool {
 	return res.Value.Bool()
 }
 
-// performFullScroll 执行更彻底的滚动策略
 func performFullScroll(page *rod.Page) {
 	logrus.Infof("执行彻底滚动策略")
 
-	// 策略1: 滚动到评论容器的不同位置
 	scrollPositionsJS := `() => {
-		const commentsContainer = document.querySelector('.comments-container');
-		if (!commentsContainer) return false;
-		
-		const maxScroll = commentsContainer.scrollHeight - commentsContainer.clientHeight;
-		if (maxScroll <= 0) return false;
-		
-		// 根据当前滚动位置决定下一步滚动
-		const currentScroll = commentsContainer.scrollTop;
-		const scrollRatio = currentScroll / maxScroll;
-		
-		if (scrollRatio < 0.3) {
-			// 滚动到30%位置
-			commentsContainer.scrollTop = maxScroll * 0.3;
-		} else if (scrollRatio < 0.6) {
-			// 滚动到60%位置
-			commentsContainer.scrollTop = maxScroll * 0.6;
-		} else if (scrollRatio < 0.9) {
-			// 滚动到90%位置
-			commentsContainer.scrollTop = maxScroll * 0.9;
-		} else {
-			// 滚动到底部
-			commentsContainer.scrollTop = maxScroll;
+		try {
+			const END_SELECTOR = '.end-container';
+			const DELTA_MIN = 480;
+			const MAX_FRAME_WAIT = 4;
+			const MAX_ATTEMPTS = 5;
+
+			const reachedEnd = () => {
+				const endEl = document.querySelector(END_SELECTOR);
+				if (!endEl) return false;
+				return (endEl.textContent || '').toUpperCase().includes('THE END');
+			};
+
+			const scrollRoot = document.scrollingElement || document.documentElement || document.body;
+			const container = document.querySelector('.comments-container');
+			const candidatesSet = new Set();
+
+			const pushCandidate = (node) => {
+				if (node && node instanceof HTMLElement) {
+					candidatesSet.add(node);
+				}
+			};
+
+			if (container) {
+				let current = container;
+				while (current) {
+					pushCandidate(current);
+					if (current === document.body || current === document.documentElement) {
+						break;
+					}
+					current = current.parentElement;
+				}
+				container.querySelectorAll('.comments-el, .list-container, [data-v-4a19279a][name="list"]').forEach(pushCandidate);
+			}
+
+			pushCandidate(scrollRoot);
+			pushCandidate(document.body);
+			pushCandidate(document.documentElement);
+
+			const metrics = (el) => {
+				if (!el) {
+					return { top: 0, max: 0, client: window.innerHeight };
+				}
+				if (el === window || el === document || el === document.body || el === document.documentElement) {
+					const root = scrollRoot;
+					return {
+						top: root.scrollTop,
+						max: Math.max(root.scrollHeight - root.clientHeight, 0),
+						client: root.clientHeight || window.innerHeight
+					};
+				}
+				return {
+					top: el.scrollTop,
+					max: Math.max(el.scrollHeight - el.clientHeight, 0),
+					client: el.clientHeight
+				};
+			};
+
+			const setScrollTop = (el, value) => {
+				if (!el) return;
+				if (el === window || el === document || el === document.body || el === document.documentElement || el === scrollRoot) {
+					scrollRoot.scrollTop = value;
+				} else {
+					el.scrollTop = value;
+				}
+			};
+
+			const dispatchWheel = (el, delta) => {
+				if (!el) return;
+				try {
+					el.dispatchEvent(new Event('scroll', { bubbles: true }));
+					if (typeof WheelEvent === 'function' && delta !== 0) {
+						const wheel = new WheelEvent('wheel', { deltaY: delta, bubbles: true, cancelable: true });
+						el.dispatchEvent(wheel);
+					}
+				} catch (e) {
+					console.debug('dispatchWheel error', e);
+				}
+			};
+
+			const waitForUpdatedScrollTop = (el, beforeTop) => {
+				let tries = 0;
+				return new Promise((resolve) => {
+					const check = () => {
+						tries++;
+						const current = metrics(el).top;
+						if (Math.abs(current - beforeTop) >= 5 || tries >= MAX_FRAME_WAIT) {
+							resolve(Math.abs(current - beforeTop) >= 5);
+							return;
+						}
+						setTimeout(check, 60);
+					};
+					setTimeout(check, 60);
+				});
+			};
+
+			const weighted = Array.from(candidatesSet).map((node) => {
+				const style = window.getComputedStyle(node);
+				const overflowY = style.overflowY;
+				const scrollable = node.scrollHeight - node.clientHeight > 40;
+				const hasScrollStyle = /auto|scroll|overlay/i.test(overflowY);
+				const weight =
+					(container && node === container ? 1200 : 0) +
+					(container && node.contains && node !== container && node.contains(container) ? 800 : 0) +
+					(hasScrollStyle ? 300 : 0) +
+					(scrollable ? 300 : 0) -
+					(node === document.body || node === document.documentElement ? 50 : 0);
+				return { node, weight };
+			});
+
+			weighted.sort((a, b) => b.weight - a.weight);
+			const candidates = weighted.slice(0, 6);
+
+			const tryScroll = async (node) => {
+				const before = metrics(node);
+				const delta = Math.max(before.client * 0.85, DELTA_MIN);
+				const desired = before.max > 0 ? Math.min(before.top + delta, before.max) : before.top + delta;
+				const applied = Math.max(0, desired - before.top);
+
+				setScrollTop(node, desired);
+				dispatchWheel(node, applied);
+				window.scrollBy(0, applied);
+
+				let moved = await waitForUpdatedScrollTop(node, before.top);
+				if (!moved && node !== scrollRoot) {
+					const rootBefore = metrics(scrollRoot).top;
+					setScrollTop(scrollRoot, rootBefore + delta);
+					dispatchWheel(scrollRoot, delta);
+					window.scrollBy(0, delta);
+					moved = await waitForUpdatedScrollTop(scrollRoot, rootBefore);
+				}
+				return moved;
+			};
+
+			const runSequence = async () => {
+				for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+					for (const { node } of candidates) {
+						if (await tryScroll(node)) {
+							return true;
+						}
+					}
+					if (reachedEnd()) {
+						return true;
+					}
+				}
+				return false;
+			};
+
+			if (reachedEnd()) {
+				return false;
+			}
+
+			return runSequence().then((moved) => moved && !reachedEnd());
+		} catch (err) {
+			console.debug('performFullScroll error', err);
+			return false;
 		}
-		
-		return true;
 	}`
 
 	if _, err := page.Eval(scrollPositionsJS); err != nil {
 		logrus.Warnf("彻底滚动失败: %v", err)
 	}
-
 }
 
 func buildIdentifier(commentID, userID string) string {
@@ -418,7 +971,6 @@ func buildIdentifier(commentID, userID string) string {
 	return userID
 }
 
-// 选取当前层主的回复按钮
 func findReplyButton(commentEl *rod.Element) (*rod.Element, error) {
 	if commentEl == nil {
 		return nil, fmt.Errorf("评论元素为空")
@@ -435,19 +987,15 @@ func findReplyButton(commentEl *rod.Element) (*rod.Element, error) {
 	return btn, nil
 }
 
-// verifyClickSuccess 验证点击是否真的成功（检查是否出现了回复输入框）
 func verifyClickSuccess(clickedEl *rod.Element) bool {
-	// 获取页面实例
 	page := clickedEl.Page()
 
-	// 检查是否出现了回复输入框
 	selectors := []string{
 		"div.input-box div.content-edit p.content-input",
 	}
 
 	for _, selector := range selectors {
 		if el, err := page.Element(selector); err == nil && el != nil {
-			// 检查元素是否可见
 			if visible, _ := el.Visible(); visible {
 				logrus.Infof("验证成功：找到可见的回复输入框 (%s)", selector)
 				return true
@@ -470,7 +1018,7 @@ func findReplyInput(page *rod.Page, commentEl *rod.Element) (*rod.Element, error
 		return el, nil
 	}
 	selectors := []string{
-		"div.input-box div.content-edit p.content-input", // 原有选择器
+		"div.input-box div.content-edit p.content-input",
 	}
 	for _, selector := range selectors {
 		if el, err := page.Element(selector); err == nil && el != nil {
@@ -486,7 +1034,6 @@ func tryClickChainForComment(el *rod.Element) bool {
 		return false
 	}
 
-	// 获取元素信息用于调试
 	text, _ := el.Text()
 	classAttr, _ := el.Attribute("class")
 	class := ""
@@ -499,15 +1046,12 @@ func tryClickChainForComment(el *rod.Element) bool {
 	}
 	logrus.Infof("准备点击元素 - 文本: '%s', 类: '%s', 标签: %s", text, class, tagName)
 
-	// 检查元素是否可见和可点击
 	visible, _ := el.Visible()
 	logrus.Infof("元素可见性: %v", visible)
 
-	// 滚动到元素位置
 	_, _ = el.Eval(`() => { try { this.scrollIntoView({behavior: "instant", block: "center"}); } catch (e) {} return true }`)
 	time.Sleep(500 * time.Millisecond)
 
-	// 只使用直接点击方式
 	clickMethods := []struct {
 		name string
 		fn   func(*rod.Element) bool
@@ -525,17 +1069,14 @@ func tryClickChainForComment(el *rod.Element) bool {
 	for i, method := range clickMethods {
 		logrus.Infof("尝试点击方法 %d: %s", i+1, method.name)
 		if method.fn(el) {
-			// 点击后等待一下，检查是否有反应
 			time.Sleep(1 * time.Second)
 
-			// 验证点击是否真的成功（检查是否出现了回复输入框）
 			success := verifyClickSuccess(el)
 			if success {
 				logrus.Infof("点击方法 %s 执行成功且有效", method.name)
 				return true
 			} else {
 				logrus.Warnf("点击方法 %s 执行成功但无效（没有出现回复输入框）", method.name)
-				// 继续尝试下一种方法
 			}
 		}
 	}
@@ -557,4 +1098,58 @@ func findSubmitButton(page *rod.Page) (*rod.Element, error) {
 		}
 	}
 	return nil, fmt.Errorf("未找到回复发布按钮")
+}
+
+func getCurrentScrollPosition(page *rod.Page) int {
+	js := `() => document.scrollingElement.scrollTop`
+	res, err := page.Eval(js)
+	if err != nil {
+		logrus.Warnf("Failed to get current scroll position: %v", err)
+		return 0
+	}
+	valStr := res.Value.Str()
+	val, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		logrus.Warnf("Failed to parse scroll position string '%s' to float64: %v", valStr, err)
+		return 0
+	}
+	return int(val)
+}
+
+func reachedCommentsEnd(page *rod.Page) bool {
+	js := `() => {
+		const END_SELECTOR = '.end-container';
+		const endEl = document.querySelector(END_SELECTOR);
+		if (!endEl) return false;
+		const text = (endEl.textContent || '').toUpperCase();
+		return text.includes('THE END');
+	}`
+	res, err := page.Eval(js)
+	if err != nil {
+		logrus.Warnf("Failed to check if comments end reached: %v", err)
+		return false
+	}
+	valStr := res.Value.Str()
+	val, err := strconv.ParseBool(valStr)
+	if err != nil {
+		logrus.Warnf("Failed to parse boolean string '%s': %v", valStr, err)
+		return false
+	}
+	return val
+}
+
+func getScrollHeight(page *rod.Page) int {
+	js := `() => document.scrollingElement.scrollHeight`
+	res, err := page.Eval(js)
+	if err != nil {
+		logrus.Warnf("Failed to get scroll height: %v", err)
+		return 0
+	}
+	valStr := res.Value.Str()
+	val, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		logrus.Warnf("Failed to parse scroll height string '%s' to float64: %v", valStr, err)
+		return 0
+	}
+	return int(val)
 }
